@@ -1,0 +1,29 @@
+---
+description: BookKeeper app – stack, structure, and conventions
+alwaysApply: true
+---
+
+# BookKeeper – Cursor-friendly context
+
+## Stack
+- **React 18** (no Router – single-page app with tab state)
+- **Vite** – dev (`npm run dev`), build (`npm run build`), deploy (`npm run deploy` → gh-pages)
+- **Lucide React** – icons (User, Lock, Mail, FileText, etc.)
+- **Storage** – `src/storage-polyfill.js` + `window.storage` (localStorage-backed, async get/set)
+
+## Where things live
+- **Main app:** `src/BookkeeperApp.jsx` – one file: auth, dashboard, invoices, clients, purchases, reports, settings, help, modals, styles. Edit here for features/UI.
+- **Entry:** `src/main.jsx` mounts BookkeeperApp; `index.html` loads it.
+- **Styles:** `src/index.css` (global) + inline `styles` object in BookkeeperApp.jsx.
+- **Config:** `vite.config.js` – base `/BookKeeper/` for GitHub Pages.
+
+## Conventions
+- **State:** useState for local UI; data (invoices, clients, etc.) in top-level state, persisted via `saveUserData(type, data)`.
+- **No backend:** All data in browser (localStorage) or Google Drive (Settings → Drive). Demo user `demo@bookkeeper.app` / `demo` does not persist to storage.
+- **Components:** InvoicesTab, ClientsTab, PurchaseInvoicesTab, SettingsTab, HelpTab, Dashboard, and modals (InvoiceModal, ClientModal, etc.) are defined in BookkeeperApp.jsx below the main component.
+- **Styling:** Single `styles` object at bottom of BookkeeperApp.jsx; use spread for overrides (e.g. `style={{ ...styles.button, color: 'red' }}`).
+
+## Run / deploy
+- **Local:** `npm run dev` (or `./RUN.sh` / `RUN.bat`) → http://localhost:3000
+- **Live:** `npm run deploy` → https://soss111.github.io/BookKeeper/
+- **Repo:** https://github.com/soss111/BookKeeper
