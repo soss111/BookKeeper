@@ -4,7 +4,7 @@ import {
   TrendingUp, TrendingDown, DollarSign, FileText, Users, Calendar,
   Edit2, Trash2, Eye, X, Save, Receipt, PieChart, BarChart3, Settings,
   Printer, Send, FileDown, ChevronUp, ChevronDown, ArrowUpDown,
-  HelpCircle
+  HelpCircle, Menu
 } from 'lucide-react';
 import './storage-polyfill.js';
 
@@ -44,17 +44,29 @@ const BookkeeperApp = () => {
   const [selectedClient, setSelectedClient] = useState(null);
   const [showModal, setShowModal] = useState(false);
   const [modalType, setModalType] = useState('');
-  const [driveToken, setDriveToken] = useState(() => {
-    try { return localStorage.getItem('bookkeeper_drive_token') || null; } catch { return null; }
-  });
-  const [driveClientId, setDriveClientId] = useState(() => {
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const isValidApiBaseUrl = (url) => {
+    const u = (url || '').trim();
+    if (!u) return false;
+    if (u.startsWith('postgresql://') || u.startsWith('postgres://')) return false;
+    if (!u.startsWith('http://') && !u.startsWith('https://')) return false;
+    return true;
+  };
+
+  const [apiBaseUrl, setApiBaseUrl] = useState(() => {
     try {
-      const stored = localStorage.getItem('bookkeeper_drive_client_id');
-      if (stored) return stored;
-      return '402575705191-d3c26eve90c7tavlstb5e044dkl4pq64.apps.googleusercontent.com';
-    } catch { return '402575705191-d3c26eve90c7tavlstb5e044dkl4pq64.apps.googleusercontent.com'; }
+      const stored = localStorage.getItem('bookkeeper_api_base_url') || import.meta.env.VITE_API_URL || '';
+      if (!isValidApiBaseUrl(stored)) {
+        if (stored) try { localStorage.removeItem('bookkeeper_api_base_url'); } catch (_) {}
+        return import.meta.env.VITE_API_URL || '';
+      }
+      return stored;
+    } catch { return import.meta.env.VITE_API_URL || ''; }
   });
-  const [driveBusy, setDriveBusy] = useState(false);
+  const [lastNeonSave, setLastNeonSave] = useState(() => {
+    try { return localStorage.getItem('bookkeeper_neon_last_save') || null; } catch { return null; }
+  });
+  const [neonBusy, setNeonBusy] = useState(false);
 
   // Demo user data
   const setupDemoUser = () => {
@@ -244,20 +256,6 @@ const BookkeeperApp = () => {
     return { demoUser, demoCompanyProfile, demoInvoices, demoPurchaseInvoices, demoClients };
   };
 
-  // Handle Google Drive OAuth callback (hash with access_token)
-  useEffect(() => {
-    const hash = window.location.hash;
-    if (hash && hash.includes('access_token=')) {
-      const params = new URLSearchParams(hash.slice(1));
-      const token = params.get('access_token');
-      if (token) {
-        try { localStorage.setItem('bookkeeper_drive_token', token); } catch (_) {}
-        setDriveToken(token);
-      }
-      window.history.replaceState(null, '', window.location.pathname + window.location.search);
-    }
-  }, []);
-
   // Initialize data from storage
   useEffect(() => {
     const checkAuth = async () => {
@@ -278,16 +276,33 @@ const BookkeeperApp = () => {
   }, []);
 
   const loadUserData = async (userEmail) => {
+    const base = (apiBaseUrl || import.meta.env.VITE_API_URL || '').trim().replace(/\/$/, '');
+    if (base && isValidApiBaseUrl(base) && userEmail !== 'demo@bookkeeper.app') {
+      try {
+        setNeonBusy(true);
+        const res = await fetch(`${base}/api/data?userId=${encodeURIComponent(userEmail)}`);
+        if (!res.ok) throw new Error(res.status === 503 ? 'Database not configured' : await res.text());
+        const data = await res.json();
+        setInvoices(Array.isArray(data.invoices) ? data.invoices : []);
+        setPurchaseInvoices(Array.isArray(data.purchaseInvoices) ? data.purchaseInvoices : []);
+        setClients(Array.isArray(data.clients) ? data.clients : []);
+        setCompanyProfile(data.companyProfile && typeof data.companyProfile === 'object' ? data.companyProfile : { name: '', regNumber: '', vatNumber: '', address: '', city: '', postalCode: '', country: '', phone: '', email: '', bankName: '', bankAccount: '', website: '' });
+      } catch (error) {
+        console.error('Error loading from Neon:', error);
+        alert('Could not load from database: ' + (error.message || 'Unknown error'));
+      } finally {
+        setNeonBusy(false);
+      }
+      return;
+    }
     try {
       const userKey = `user_${userEmail.replace(/[^a-zA-Z0-9]/g, '_')}`;
-      
       const [invoicesData, purchaseInvoicesData, clientsData, companyData] = await Promise.all([
         window.storage.get(`${userKey}_invoices`).catch(() => null),
         window.storage.get(`${userKey}_purchase_invoices`).catch(() => null),
         window.storage.get(`${userKey}_clients`).catch(() => null),
         window.storage.get(`${userKey}_company`).catch(() => null)
       ]);
-
       if (invoicesData?.value) setInvoices(JSON.parse(invoicesData.value));
       if (purchaseInvoicesData?.value) setPurchaseInvoices(JSON.parse(purchaseInvoicesData.value));
       if (clientsData?.value) setClients(JSON.parse(clientsData.value));
@@ -299,12 +314,36 @@ const BookkeeperApp = () => {
 
   const saveUserData = async (dataType, data) => {
     if (!currentUser) return;
-    
-    // Don't save demo user data to storage
-    if (currentUser.email === 'demo@bookkeeper.app') {
+    if (currentUser.email === 'demo@bookkeeper.app') return;
+
+    const base = (apiBaseUrl || import.meta.env.VITE_API_URL || '').trim().replace(/\/$/, '');
+    if (base && isValidApiBaseUrl(base)) {
+      try {
+        setNeonBusy(true);
+        const payload = {
+          userId: currentUser.email,
+          invoices: dataType === 'invoices' ? data : invoices,
+          purchaseInvoices: dataType === 'purchase_invoices' ? data : purchaseInvoices,
+          clients: dataType === 'clients' ? data : clients,
+          companyProfile: dataType === 'company' ? data : companyProfile
+        };
+        const res = await fetch(`${base}/api/data`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) throw new Error(await res.text().catch(() => res.statusText));
+        const when = new Date().toISOString();
+        setLastNeonSave(when);
+        try { localStorage.setItem('bookkeeper_neon_last_save', when); } catch (_) {}
+      } catch (error) {
+        console.error('Error saving to Neon:', error);
+        alert('Could not save to database: ' + (error.message || 'Unknown error'));
+      } finally {
+        setNeonBusy(false);
+      }
       return;
     }
-    
     try {
       const userKey = `user_${currentUser.email.replace(/[^a-zA-Z0-9]/g, '_')}`;
       await window.storage.set(`${userKey}_${dataType}`, JSON.stringify(data));
@@ -824,126 +863,18 @@ ${companyProfile.email || ''}`);
     });
   };
 
-  const DRIVE_FILE_NAME = 'bookkeeper-data.json';
-  const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
-  const driveFileQuery = () => `name='${DRIVE_FILE_NAME}'`;
-  const DRIVE_SPACES = 'appDataFolder';
-
-  const driveConnect = (clientId) => {
-    const cid = (clientId || driveClientId || '').trim();
-    if (!cid) {
-      alert('Please enter your Google Client ID in the field above. Get it from Google Cloud Console (APIs & Services → Credentials).');
-      return;
-    }
-    try { localStorage.setItem('bookkeeper_drive_client_id', cid); } catch (_) {}
-    setDriveClientId(cid);
-    const redirectUri = window.location.origin + window.location.pathname;
-    const url = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(cid)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=token&scope=${encodeURIComponent(DRIVE_SCOPE)}`;
-    window.location.href = url;
-  };
-
-  const driveDisconnect = () => {
-    try { localStorage.removeItem('bookkeeper_drive_token'); } catch (_) {}
-    setDriveToken(null);
-  };
-
-  const drivePost = async () => {
-    if (!driveToken) { alert('Connect Google Drive first.'); return; }
-    setDriveBusy(true);
+  const testApiConnection = async (base) => {
+    const url = (base || apiBaseUrl || import.meta.env.VITE_API_URL || '').trim().replace(/\/$/, '');
+    if (!url) return { ok: false, error: 'API URL is empty' };
+    if (!isValidApiBaseUrl(url)) return { ok: false, error: 'Use your API server URL (e.g. http://localhost:3003), not the Neon connection string. The connection string belongs in server/.env only.' };
     try {
-      const data = {
-        invoices,
-        purchaseInvoices,
-        clients,
-        companyProfile,
-        exportedAt: new Date().toISOString()
-      };
-      const body = JSON.stringify(data);
-      const listRes = await fetch(
-        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(driveFileQuery())}&spaces=${DRIVE_SPACES}`,
-        { headers: { Authorization: `Bearer ${driveToken}` } }
-      );
-      if (!listRes.ok) {
-        if (listRes.status === 401) { driveDisconnect(); alert('Session expired. Connect Google Drive again.'); return; }
-        throw new Error(listRes.statusText);
-      }
-      const listJson = await listRes.json();
-      const fileId = listJson.files?.[0]?.id;
-      if (fileId) {
-        const updateRes = await fetch(
-          `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`,
-          { method: 'PATCH', headers: { Authorization: `Bearer ${driveToken}`, 'Content-Type': 'application/json' }, body }
-        );
-        if (!updateRes.ok) {
-          if (updateRes.status === 401) { driveDisconnect(); alert('Session expired. Connect Google Drive again.'); return; }
-          throw new Error(updateRes.statusText);
-        }
-        alert('Data saved to Google Drive.');
-      } else {
-        const meta = JSON.stringify({ name: DRIVE_FILE_NAME, parents: ['appDataFolder'] });
-        const boundary = '-------bookkeeper-boundary';
-        const multipart = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n${body}\r\n--${boundary}--`;
-        const createRes = await fetch(
-          'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',
-          { method: 'POST', headers: { Authorization: `Bearer ${driveToken}`, 'Content-Type': `multipart/related; boundary=${boundary}` }, body: multipart }
-        );
-        if (!createRes.ok) {
-          if (createRes.status === 401) { driveDisconnect(); alert('Session expired. Connect Google Drive again.'); return; }
-          throw new Error(createRes.statusText);
-        }
-        alert('Data saved to Google Drive.');
-      }
+      const res = await fetch(`${url}/api/health`);
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) return { ok: true };
+      return { ok: false, error: data.error || res.statusText || `HTTP ${res.status}` };
     } catch (err) {
-      alert('Failed to save to Drive: ' + (err.message || 'Unknown error'));
+      return { ok: false, error: err.message || 'Cannot reach API. Is the server running on ' + url + '?' };
     }
-    setDriveBusy(false);
-  };
-
-  const driveGet = async () => {
-    if (!driveToken) { alert('Connect Google Drive first.'); return; }
-    setDriveBusy(true);
-    try {
-      const listRes = await fetch(
-        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(driveFileQuery())}&spaces=${DRIVE_SPACES}`,
-        { headers: { Authorization: `Bearer ${driveToken}` } }
-      );
-      if (!listRes.ok) {
-        if (listRes.status === 401) { driveDisconnect(); alert('Session expired. Connect Google Drive again.'); return; }
-        throw new Error(listRes.statusText);
-      }
-      const listJson = await listRes.json();
-      const fileId = listJson.files?.[0]?.id;
-      if (!fileId) { alert('No BookKeeper data file found on Drive. Use "Save to Drive (POST)" first.'); setDriveBusy(false); return; }
-      const getRes = await fetch(
-        `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
-        { headers: { Authorization: `Bearer ${driveToken}` } }
-      );
-      if (!getRes.ok) {
-        if (getRes.status === 401) { driveDisconnect(); alert('Session expired. Connect Google Drive again.'); return; }
-        throw new Error(getRes.statusText);
-      }
-      const raw = await getRes.text();
-      const data = JSON.parse(raw);
-      const invoicesData = Array.isArray(data.invoices) ? data.invoices : [];
-      const purchaseData = Array.isArray(data.purchaseInvoices) ? data.purchaseInvoices : [];
-      const clientsData = Array.isArray(data.clients) ? data.clients : [];
-      const companyData = data.companyProfile && typeof data.companyProfile === 'object' ? data.companyProfile : companyProfile;
-      setInvoices(invoicesData);
-      setPurchaseInvoices(purchaseData);
-      setClients(clientsData);
-      setCompanyProfile(companyData);
-      if (currentUser && currentUser.email !== 'demo@bookkeeper.app') {
-        const userKey = `user_${currentUser.email.replace(/[^a-zA-Z0-9]/g, '_')}`;
-        await window.storage.set(`${userKey}_invoices`, JSON.stringify(invoicesData));
-        await window.storage.set(`${userKey}_purchase_invoices`, JSON.stringify(purchaseData));
-        await window.storage.set(`${userKey}_clients`, JSON.stringify(clientsData));
-        await window.storage.set(`${userKey}_company`, JSON.stringify(companyData));
-      }
-      alert('Data loaded from Google Drive.');
-    } catch (err) {
-      alert('Failed to load from Drive: ' + (err.message || 'Unknown error'));
-    }
-    setDriveBusy(false);
   };
 
   // Calculate dashboard stats
@@ -969,9 +900,9 @@ ${companyProfile.email || ''}`);
   if (!isLoggedIn) {
     return (
       <div style={styles.authContainer}>
-        <div style={styles.authBox}>
+        <div className="auth-box" style={styles.authBox}>
           <div style={styles.authHeader}>
-            <h1 style={styles.authTitle}>BookKeeper</h1>
+            <h1 className="auth-title" style={styles.authTitle}>BookKeeper</h1>
             <p style={styles.authSubtitle}>Manage your business finances with ease</p>
           </div>
 
@@ -1110,15 +1041,22 @@ ${companyProfile.email || ''}`);
   }
 
   return (
-    <div style={styles.app}>
+    <div className="app-layout" style={styles.app}>
+      {/* Overlay when sidebar open on mobile */}
+      {sidebarOpen && (
+        <div className="sidebar-overlay" onClick={() => setSidebarOpen(false)} aria-hidden="true" />
+      )}
       {/* Sidebar */}
-      <div style={styles.sidebar}>
-        <div style={styles.sidebarHeader}>
+      <div className={`app-sidebar ${sidebarOpen ? 'open' : ''}`} style={styles.sidebar}>
+        <div style={{ ...styles.sidebarHeader, position: 'relative' }}>
           <h2 style={styles.logo}>BookKeeper</h2>
           <p style={styles.userInfo}>{currentUser.business || currentUser.name}</p>
+          <button type="button" className="sidebar-close-btn" onClick={() => setSidebarOpen(false)} aria-label="Close menu">
+            <X size={24} />
+          </button>
         </div>
 
-        <nav style={styles.nav}>
+        <nav className="nav" style={styles.nav}>
           {[
             { id: 'dashboard', label: 'Dashboard', icon: BarChart3 },
             { id: 'invoices', label: 'Sales Invoices', icon: FileText },
@@ -1130,7 +1068,7 @@ ${companyProfile.email || ''}`);
           ].map(item => (
             <button
               key={item.id}
-              onClick={() => setActiveTab(item.id)}
+              onClick={() => { setActiveTab(item.id); setSidebarOpen(false); }}
               style={{
                 ...styles.navItem,
                 ...(activeTab === item.id ? styles.navItemActive : {})
@@ -1142,24 +1080,46 @@ ${companyProfile.email || ''}`);
           ))}
         </nav>
 
-        <button onClick={handleLogout} style={styles.logoutButton}>
+        {(apiBaseUrl || import.meta.env.VITE_API_URL) && isValidApiBaseUrl(apiBaseUrl || import.meta.env.VITE_API_URL) && (
+          <div style={{ padding: '12px 16px', borderTop: '1px solid #e5e7eb' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px', fontSize: '14px', color: '#6b7280' }}>
+              <span style={{ color: '#16a34a' }}>●</span>
+              <span>Neon database</span>
+            </div>
+            {lastNeonSave && (
+              <div style={{ fontSize: '12px', color: '#9ca3af', marginBottom: '8px' }}>
+                Last saved: {new Date(lastNeonSave).toLocaleString()}
+              </div>
+            )}
+            <button type="button" onClick={() => currentUser?.email && currentUser.email !== 'demo@bookkeeper.app' && loadUserData(currentUser.email)} disabled={!currentUser || currentUser.email === 'demo@bookkeeper.app' || neonBusy} style={{ ...styles.filterButton, padding: '6px 10px', fontSize: '13px' }}>
+              {neonBusy ? '…' : 'Load'}
+            </button>
+          </div>
+        )}
+
+        <button type="button" className="logout-button" onClick={handleLogout} style={styles.logoutButton}>
           <LogOut size={20} />
           <span>Logout</span>
         </button>
       </div>
 
       {/* Main Content */}
-      <div style={styles.main}>
-        <div style={styles.header}>
-          <h1 style={styles.pageTitle}>
-            {activeTab.charAt(0).toUpperCase() + activeTab.slice(1)}
-          </h1>
+      <div className="app-main" style={styles.main}>
+        <div className="app-header" style={styles.header}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0 }}>
+            <button type="button" className="menu-toggle" onClick={() => setSidebarOpen(true)} aria-label="Open menu">
+              <Menu size={24} />
+            </button>
+            <h1 style={styles.pageTitle}>
+              {activeTab.charAt(0).toUpperCase() + activeTab.slice(1)}
+            </h1>
+          </div>
           <div style={styles.headerActions}>
             <span style={styles.userName}>{currentUser.name}</span>
           </div>
         </div>
 
-        <div style={styles.content}>
+        <div className="app-content" style={styles.content}>
           {activeTab === 'dashboard' && (
             <Dashboard 
               stats={stats} 
@@ -1242,14 +1202,21 @@ ${companyProfile.email || ''}`);
               onSave={saveCompanyProfile}
               onExportData={exportData}
               onImportData={importData}
-              driveToken={driveToken}
-              driveClientId={driveClientId}
-              onDriveClientIdChange={setDriveClientId}
-              onDriveConnect={driveConnect}
-              onDriveDisconnect={driveDisconnect}
-              onDrivePost={drivePost}
-              onDriveGet={driveGet}
-              driveBusy={driveBusy}
+              apiBaseUrl={apiBaseUrl}
+              onApiBaseUrlChange={(url) => {
+                const u = (url || '').trim();
+                if (u && !isValidApiBaseUrl(u)) {
+                  alert('Use your API server URL (e.g. http://localhost:3003), not the Neon connection string. The connection string belongs in server/.env only.');
+                  return;
+                }
+                setApiBaseUrl(u);
+                try { localStorage.setItem('bookkeeper_api_base_url', u || ''); } catch (_) {}
+              }}
+              lastNeonSave={lastNeonSave}
+              neonBusy={neonBusy}
+              onLoadFromNeon={() => currentUser?.email && currentUser.email !== 'demo@bookkeeper.app' && loadUserData(currentUser.email)}
+              currentUser={currentUser}
+              onTestConnection={testApiConnection}
             />
           )}
 
@@ -1363,7 +1330,7 @@ const Dashboard = ({ stats, invoices, purchaseInvoices, onViewInvoices, onViewPu
         />
       </div>
 
-      <div style={styles.dashboardGrid}>
+      <div className="dashboard-grid" style={styles.dashboardGrid}>
         <div style={styles.dashboardCard}>
           <div style={styles.cardHeader}>
             <h3 style={styles.cardTitle}>Recent Sales Invoices</h3>
@@ -1479,7 +1446,7 @@ const InvoicesTab = ({ invoices, clients, onAdd, onEdit, onDelete, onStatusChang
 
   return (
     <div>
-      <div style={styles.tabHeader}>
+      <div className="tab-header-row" style={styles.tabHeader}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px', flexWrap: 'wrap' }}>
           <div style={styles.filterGroup}>
             {['all', 'pending', 'paid', 'overdue'].map(f => (
@@ -1502,16 +1469,18 @@ const InvoicesTab = ({ invoices, clients, onAdd, onEdit, onDelete, onStatusChang
               placeholder="Search by invoice # or client..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
+              className="search-input-mobile"
               style={styles.searchInput}
             />
           </div>
         </div>
-        <button onClick={onAdd} style={styles.addButton}>
+        <button onClick={onAdd} className="add-button-touch" style={styles.addButton}>
           <Plus size={20} />
           New Invoice
         </button>
       </div>
 
+      <div className="table-scroll">
       <div style={styles.table}>
         <div style={{...styles.tableHeader, gridTemplateColumns: '120px 180px 100px 100px 100px 240px'}}>
           <div style={{...styles.th, ...styles.sortableTh}} onClick={() => toggleSort('number')}>Invoice # <SortIcon col="number" /></div>
@@ -1584,6 +1553,7 @@ const InvoicesTab = ({ invoices, clients, onAdd, onEdit, onDelete, onStatusChang
           <div style={styles.emptyTable}>No invoices found</div>
         )}
       </div>
+      </div>
     </div>
   );
 };
@@ -1633,7 +1603,7 @@ const ClientsTab = ({ clients, onAdd, onEdit, onStatusChange, onDelete }) => {
 
   return (
     <div>
-      <div style={styles.tabHeader}>
+      <div className="tab-header-row" style={styles.tabHeader}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px', flexWrap: 'wrap' }}>
           <div style={styles.filterGroup}>
             {['all', 'active', 'passive'].map(f => (
@@ -1656,16 +1626,18 @@ const ClientsTab = ({ clients, onAdd, onEdit, onStatusChange, onDelete }) => {
               placeholder="Search clients by name, email, phone..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
+              className="search-input-mobile"
               style={styles.searchInput}
             />
           </div>
         </div>
-        <button onClick={onAdd} style={styles.addButton}>
+        <button onClick={onAdd} className="add-button-touch" style={styles.addButton}>
           <Plus size={20} />
           New Client
         </button>
       </div>
 
+      <div className="table-scroll">
       <div style={styles.table}>
         <div style={{...styles.tableHeader, gridTemplateColumns: gridCols}}>
           <div style={{...styles.th, ...styles.sortableTh}} onClick={() => toggleSort('name')}>Name <SortIcon col="name" /></div>
@@ -1709,6 +1681,7 @@ const ClientsTab = ({ clients, onAdd, onEdit, onStatusChange, onDelete }) => {
         ) : (
           <div style={styles.emptyTable}>No clients found</div>
         )}
+      </div>
       </div>
     </div>
   );
@@ -1839,7 +1812,7 @@ const InvoiceModal = ({ invoice, clients, onSave, onClose }) => {
   };
 
   return (
-    <div style={styles.modalOverlay} onClick={onClose}>
+    <div className="modal-overlay" style={styles.modalOverlay} onClick={onClose}>
       <div style={styles.modalContent} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <h2 style={styles.modalTitle}>{invoice ? 'Edit Invoice' : 'New Invoice'}</h2>
@@ -2082,7 +2055,7 @@ const ClientModal = ({ client, onSave, onClose }) => {
   };
 
   return (
-    <div style={styles.modalOverlay} onClick={onClose}>
+    <div className="modal-overlay" style={styles.modalOverlay} onClick={onClose}>
       <div style={{...styles.modalContent, maxWidth: '500px'}} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <h2 style={styles.modalTitle}>{client ? 'Edit Client' : 'New Client'}</h2>
@@ -2951,7 +2924,7 @@ const PurchaseInvoicesTab = ({ purchaseInvoices, onAdd, onEdit, onDelete, onStat
 
   return (
     <div>
-      <div style={styles.tabHeader}>
+      <div className="tab-header-row" style={styles.tabHeader}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px', flexWrap: 'wrap' }}>
           <div style={styles.filterGroup}>
             {['all', 'pending', 'paid'].map(f => (
@@ -2974,16 +2947,18 @@ const PurchaseInvoicesTab = ({ purchaseInvoices, onAdd, onEdit, onDelete, onStat
               placeholder="Search by invoice # or supplier..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
+              className="search-input-mobile"
               style={styles.searchInput}
             />
           </div>
         </div>
-        <button onClick={onAdd} style={styles.addButton}>
+        <button onClick={onAdd} className="add-button-touch" style={styles.addButton}>
           <Plus size={20} />
           New Purchase Invoice
         </button>
       </div>
 
+      <div className="table-scroll">
       <div style={styles.table}>
         <div style={{...styles.tableHeader, gridTemplateColumns: '120px 180px 100px 100px 100px 200px'}}>
           <div style={{...styles.th, ...styles.sortableTh}} onClick={() => toggleSort('number')}>Invoice # <SortIcon col="number" /></div>
@@ -3025,6 +3000,7 @@ const PurchaseInvoicesTab = ({ purchaseInvoices, onAdd, onEdit, onDelete, onStat
         ) : (
           <div style={styles.emptyTable}>No purchase invoices found</div>
         )}
+      </div>
       </div>
     </div>
   );
@@ -3077,10 +3053,22 @@ const HelpTab = () => {
 };
 
 // Settings Tab
-const SettingsTab = ({ companyProfile, onSave, onExportData, onImportData, driveToken, driveClientId, onDriveClientIdChange, onDriveConnect, onDriveDisconnect, onDrivePost, onDriveGet, driveBusy }) => {
+const SettingsTab = ({ companyProfile, onSave, onExportData, onImportData, apiBaseUrl, onApiBaseUrlChange, lastNeonSave, neonBusy, onLoadFromNeon, currentUser, onTestConnection }) => {
   const [formData, setFormData] = useState(companyProfile);
   const [saving, setSaving] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState(null);
+  const [connectionChecking, setConnectionChecking] = useState(false);
   const fileInputRef = React.useRef(null);
+
+  const handleTestConnection = async () => {
+    const base = (apiBaseUrl || import.meta.env.VITE_API_URL || '').trim();
+    if (!base) { setConnectionStatus({ ok: false, error: 'Enter API URL first' }); return; }
+    setConnectionChecking(true);
+    setConnectionStatus(null);
+    const result = await onTestConnection?.(base);
+    setConnectionStatus(result);
+    setConnectionChecking(false);
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -3254,45 +3242,44 @@ const SettingsTab = ({ companyProfile, onSave, onExportData, onImportData, drive
           </div>
 
           <div style={styles.formSection}>
-            <h3 style={styles.sectionTitle}>Google Drive (GET / POST data)</h3>
+            <h3 style={styles.sectionTitle}>Database (Neon)</h3>
             <p style={{ margin: '0 0 12px', fontSize: '14px', color: '#6b7280' }}>
-              Where is my data stored? In your Google account’s <strong>app data folder</strong> (Drive API <code style={{ background: '#f3f4f6', padding: '2px 6px', borderRadius: '4px' }}>appDataFolder</code>). Only this app can read/write it; it does not appear in drive.google.com or in My Drive. The file name is <strong>bookkeeper-data.json</strong>. Storage uses your normal Google Drive quota (e.g. 15 GB free). Single save is limited to about <strong>5 MB</strong> per file (enough for many thousands of invoices).
+              Store your data in <a href="https://console.neon.tech" target="_blank" rel="noopener noreferrer" style={{ color: '#667eea' }}>Neon</a> Postgres. Run the API server (see README), set <code style={{ background: '#f3f4f6', padding: '2px 6px', borderRadius: '4px' }}>DATABASE_URL</code> in <strong>server/.env</strong>, then enter your <strong>API server URL</strong> here (e.g. <code style={{ background: '#f3f4f6', padding: '2px 6px', borderRadius: '4px' }}>http://localhost:3003</code>). Do not paste the Neon connection string here.
             </p>
             <div style={{ marginBottom: '12px' }}>
-              <label style={styles.label}>Google Client ID</label>
+              <label style={styles.label}>API URL (e.g. http://localhost:3003)</label>
               <input
-                type="text"
-                value={driveClientId}
-                onChange={(e) => onDriveClientIdChange?.(e.target.value)}
-                placeholder="xxxxx.apps.googleusercontent.com"
+                type="url"
+                value={apiBaseUrl || ''}
+                onChange={(e) => onApiBaseUrlChange?.(e.target.value)}
+                placeholder="http://localhost:3003"
                 style={styles.modalInput}
               />
             </div>
             <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'center' }}>
-              {!driveToken ? (
-                <button type="button" onClick={() => onDriveConnect?.()} style={{ ...styles.addButton, display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
-                  Connect Google Drive
-                </button>
-              ) : (
-                <>
-                  <button type="button" onClick={onDrivePost} disabled={driveBusy} style={{ ...styles.addButton, display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
-                    {driveBusy ? '…' : 'Save to Drive (POST)'}
-                  </button>
-                  <button type="button" onClick={onDriveGet} disabled={driveBusy} style={{ ...styles.filterButton, display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
-                    {driveBusy ? '…' : 'Load from Drive (GET)'}
-                  </button>
-                  <button type="button" onClick={onDriveDisconnect} style={{ ...styles.filterButton, color: '#dc2626' }}>
-                    Disconnect
-                  </button>
-                </>
-              )}
+              <button type="button" onClick={handleTestConnection} disabled={!apiBaseUrl || connectionChecking} style={{ ...styles.filterButton, display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+                {connectionChecking ? '…' : 'Test connection'}
+              </button>
+              <button type="button" onClick={onLoadFromNeon} disabled={!apiBaseUrl || !currentUser || currentUser.email === 'demo@bookkeeper.app' || neonBusy} style={{ ...styles.filterButton, display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+                {neonBusy ? '…' : 'Load from database'}
+              </button>
             </div>
+            {connectionStatus && (
+              <p style={{ margin: '8px 0 0', fontSize: '13px', color: connectionStatus.ok ? '#059669' : '#dc2626' }}>
+                {connectionStatus.ok ? '✓ Database connected' : '✗ ' + (connectionStatus.error || 'Connection failed')}
+              </p>
+            )}
+            {lastNeonSave && (
+              <p style={{ margin: '8px 0 0', fontSize: '13px', color: '#6b7280' }}>
+                Last saved to Neon: {new Date(lastNeonSave).toLocaleString()}
+              </p>
+            )}
           </div>
 
           <div style={styles.formSection}>
             <h3 style={styles.sectionTitle}>Data backup (file)</h3>
             <p style={{ margin: '0 0 16px', fontSize: '14px', color: '#6b7280' }}>
-              Export your data as a JSON file (e.g. save to Google Drive manually). Import a backup file to restore data.
+              Export your data as a JSON file. Import a backup file to restore data.
             </p>
             <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
               <button type="button" onClick={onExportData} style={{ ...styles.addButton, display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
@@ -3376,7 +3363,7 @@ const PurchaseInvoiceModal = ({ invoice, onSave, onClose }) => {
   };
 
   return (
-    <div style={styles.modalOverlay} onClick={onClose}>
+    <div className="modal-overlay" style={styles.modalOverlay} onClick={onClose}>
       <div style={styles.modalContent} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <h2 style={styles.modalTitle}>{invoice ? 'Edit Purchase Invoice' : 'New Purchase Invoice'}</h2>

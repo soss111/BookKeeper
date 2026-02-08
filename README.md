@@ -1,6 +1,8 @@
 # BookKeeper
 
-Professional bookkeeping: login, company profile, sales/purchase invoices, clients, reports. Data in browser (localStorage) or Google Drive.
+Professional bookkeeping: login, company profile, sales/purchase invoices, clients, reports. Data in browser (localStorage) or **Neon Postgres**.
+
+> **Fix `GET .../src/main.jsx 404`:** GitHub repo → **Settings** → **Pages** → set **Branch** to **gh-pages** (not main) → Save. Then open https://soss111.github.io/BookKeeper/
 
 ## Run
 
@@ -9,6 +11,19 @@ Professional bookkeeping: login, company profile, sales/purchase invoices, clien
 - **Deploy:** From the **bookkeeper-app** folder run `npm run deploy` (updates live site). First time: repo **Settings → Pages** → Source: branch **gh-pages**, folder **/ (root)**.
 
 Repo: [github.com/soss111/BookKeeper](https://github.com/soss111/BookKeeper)
+
+## Database (Neon)
+
+Use [Neon](https://console.neon.tech) Postgres as the main database:
+
+1. **Neon:** Create a project at [console.neon.tech](https://console.neon.tech) → **Connect** → copy the **Node.js** connection string.
+2. **API server:** From the **bookkeeper-app** folder run:
+   - `cd server && npm install`
+   - Create `server/.env` with `DATABASE_URL=<your Neon connection string>` (see `server/.env.example`).
+   - `npm start` (or `npm run dev`) → API on http://localhost:3003
+3. **App:** In **Settings** → **Database (Neon)** enter the API URL (e.g. `http://localhost:3003` for local, or your deployed API URL). Load/save will use Neon instead of local storage.
+
+Deploy the API (e.g. Railway, Render, Fly.io) and set `DATABASE_URL` there; then set that API URL in the app.
 
 ## Demo
 
